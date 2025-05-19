@@ -108,53 +108,59 @@ public class AudioCaptureStreamHandler: StreamHandler {
     private fun record() {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
 
-        val bufferSize: Int = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        val bufferCount: Int = 10
-        var bufferIndex: Int = 0
-        val audioBuffer = ArrayList<FloatArray>()
-        val record: AudioRecord = AudioRecord.Builder()
-                        .setAudioSource(AUDIO_SOURCE)
-                        .setAudioFormat(
-                          AudioFormat.Builder()
-                            .setEncoding(AUDIO_FORMAT)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(CHANNEL_CONFIG)
-                            .build()
-                        )
-                        .setBufferSizeInBytes(bufferSize)
-                        .build()
+        val bufferSize = SAMPLE_RATE / 50 // 20ms buffer at 24kHz = 480 samples
+        val audioBuffer = ShortArray(bufferSize)
 
-        for (i in 1..bufferCount) {
-            audioBuffer.add(FloatArray(bufferSize))
-        }
+        val record = AudioRecord.Builder()
+            .setAudioSource(AUDIO_SOURCE)
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(SAMPLE_RATE)
+                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                    .build()
+            )
+            .setBufferSizeInBytes(bufferSize * 2)
+            .build()
 
-        if (record.getState() != AudioRecord.STATE_INITIALIZED) {
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
             sendError("AUDIO_RECORD_INITIALIZE_ERROR", "AudioRecord can't initialize")
+            return
         }
 
         record.startRecording()
-        
-        actualSampleRate = record.getSampleRate()
-        
-        while (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
-          Thread.yield() 
+        actualSampleRate = record.sampleRate
+
+        while (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            Thread.yield()
         }
-          
-        // Log.d(TAG, "recording started, isCapturing = " + isCapturing + ", actualSampleRate = " + actualSampleRate)
-        
+
         while (isCapturing) {
             try {
-                record.read(audioBuffer[bufferIndex], 0, audioBuffer[bufferIndex].size, AudioRecord.READ_BLOCKING)
-                sendBuffer(audioBuffer, bufferIndex)
+                val readCount = record.read(audioBuffer, 0, audioBuffer.size, AudioRecord.READ_BLOCKING)
+                if (readCount > 0) {
+                    val pcmBytes = ByteArray(readCount * 2)
+                    for (i in 0 until readCount) {
+                        val value = audioBuffer[i].toInt()
+                        pcmBytes[i * 2] = (value and 0xFF).toByte()
+                        pcmBytes[i * 2 + 1] = ((value shr 8) and 0xFF).toByte()
+                    }
+
+                    uiThreadHandler.post {
+                        if (isCapturing) {
+                            _events?.success(pcmBytes)
+                        }
+                    }
+                }
             } catch (e: Exception) {
-                Log.d(TAG, e.toString())
-                sendError("AUDIO_RECORD_READ_ERROR", "AudioRecord can't read")
+                sendError("AUDIO_RECORD_READ_ERROR", e.message ?: "Unknown read error")
                 Thread.yield()
             }
-            bufferIndex = (bufferIndex+1) % bufferCount
         }
 
         record.stop()
         record.release()
     }
+
+
 }
